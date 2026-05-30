@@ -16,8 +16,7 @@ Poly-Maker is a comprehensive solution for automated market making on Polymarket
 
 The repository consists of several interconnected modules:
 
-- `poly_data`: Core data management and market making logic
-- `poly_merger`: Utility for merging positions (based on open-source Polymarket code)
+- `poly_data`: Core data management and market making logic (including relayer-based position merging)
 - `poly_stats`: Account statistics tracking
 - `poly_utils`: Shared utility functions
 - `data_updater`: Separate module for collecting market information
@@ -25,9 +24,8 @@ The repository consists of several interconnected modules:
 ## Requirements
 
 - Python 3.9.10 or higher
-- Node.js (for poly_merger)
 - Google Sheets API credentials
-- Polymarket account and API credentials
+- Polymarket account and API credentials (including Builder API credentials for position merging)
 
 ## Installation
 
@@ -84,36 +82,30 @@ cd poly-maker
 uv sync
 ```
 
-#### 3. Install Node.js dependencies for the merger
-
-```bash
-cd poly_merger
-npm install
-cd ..
-```
-
-#### 4. Set up environment variables
+#### 3. Set up environment variables
 
 ```bash
 cp .env.example .env
 ```
 
-#### 5. Configure your credentials in `.env`
+#### 4. Configure your credentials in `.env`
 
 Edit the `.env` file with your credentials:
 - `PK`: Your private key for Polymarket
-- `BROWSER_ADDRESS`: Your wallet address
+- `BROWSER_ADDRESS`: Your Polymarket proxy/Safe wallet address (the order "funder")
+- `SIGNATURE_TYPE`: `1` for a Polymarket proxy wallet (default), `2` for a Gnosis Safe
+- `BUILDER_API_KEY` / `BUILDER_SECRET` / `BUILDER_PASSPHRASE`: Builder API credentials, required for position merging via the relayer
 
-**Important:** Make sure your wallet has done at least one trade through the UI so that the permissions are proper.
+**Important:** Make sure your wallet has done at least one trade through the UI so that the permissions are proper (this also sets the on-chain approvals the relayer merge relies on).
 
-#### 6. Set up Google Sheets integration
+#### 5. Set up Google Sheets integration
 
 - Create a Google Service Account and download credentials to the main directory
 - Copy the [sample Google Sheet](https://docs.google.com/spreadsheets/d/1Kt6yGY7CZpB75cLJJAdWo7LSp9Oz7pjqfuVWwgtn7Ns/edit?gid=1884499063#gid=1884499063)
 - Add your Google service account to the sheet with edit permissions
 - Update `SPREADSHEET_URL` in your `.env` file
 
-#### 7. Update market data
+#### 6. Update market data
 
 Run the market data updater to fetch all available markets:
 
@@ -127,7 +119,7 @@ This should run continuously in the background (preferably on a different IP tha
 - Select markets from the "Volatility Markets" sheet
 - Configure parameters in the "Hyperparameters" sheet (default parameters that worked well in November are included)
 
-#### 8. Start the market making bot
+#### 7. Start the market making bot
 
 ```bash
 uv run python main.py
@@ -145,9 +137,14 @@ The bot is configured via a Google Spreadsheet with several worksheets:
 - **Hyperparameters**: Configuration parameters for the trading logic
 
 
-## Poly Merger
+## Position Merging
 
-The `poly_merger` module is a particularly powerful utility that handles position merging on Polymarket. It's built on open-source Polymarket code and provides a smooth way to consolidate positions, reducing gas fees and improving capital efficiency.
+When the bot holds both the YES and NO outcomes of the same market above a threshold, it merges them
+back into collateral to free up capital. Merges are submitted through the **Polymarket Relayer API**
+(via the official `py-builder-relayer-client`) as gas-free PROXY/SAFE meta-transactions, routed through
+the CLOB v2 collateral adapters so the proceeds are returned as **pUSD**. This requires Builder API
+credentials in `.env` (`BUILDER_API_KEY` / `BUILDER_SECRET` / `BUILDER_PASSPHRASE`) and replaces the
+previous Node.js merger. See `PolymarketClient.merge_positions` in `poly_data/polymarket_client.py`.
 
 ## Important Notes
 

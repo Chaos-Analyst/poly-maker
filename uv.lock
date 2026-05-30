@@ -1956,6 +1956,7 @@ dependencies = [
     { name = "gspread-dataframe" },
     { name = "pandas" },
     { name = "poly-eip712-structs" },
+    { name = "py-builder-relayer-client" },
     { name = "py-clob-client-v2" },
     { name = "py-order-utils" },
     { name = "python-dotenv" },
@@ -1982,6 +1983,7 @@ requires-dist = [
     { name = "gspread-dataframe", specifier = "==4.0.0" },
     { name = "pandas", specifier = "==2.3.3" },
     { name = "poly-eip712-structs", specifier = "==0.0.1" },
+    { name = "py-builder-relayer-client", specifier = "==0.0.2" },
     { name = "py-clob-client-v2", specifier = "==1.0.1" },
     { name = "py-order-utils", specifier = "==0.3.2" },
     { name = "pytest", marker = "extra == 'dev'", specifier = "==8.2.2" },
@@ -2120,6 +2122,37 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/a4/45/d78d136c3a3d215677abb886785aae744da2c3005bcb99e58640c56529b1/propcache-0.4.1-cp39-cp39-win_amd64.whl", hash = "sha256:948dab269721ae9a87fd16c514a0a2c2a1bdb23a9a61b969b0f9d9ee2968546f", size = 41912, upload-time = "2025-10-08T19:48:57.995Z" },
     { url = "https://files.pythonhosted.org/packages/fc/2a/b0632941f25139f4e58450b307242951f7c2717a5704977c6d5323a800af/propcache-0.4.1-cp39-cp39-win_arm64.whl", hash = "sha256:5fd37c406dd6dc85aa743e214cef35dc54bbdd1419baac4f6ae5e5b1a2976938", size = 38450, upload-time = "2025-10-08T19:48:59.349Z" },
     { url = "https://files.pythonhosted.org/packages/5b/5a/bc7b4a4ef808fa59a816c17b20c4bef6884daebbdf627ff2a161da67da19/propcache-0.4.1-py3-none-any.whl", hash = "sha256:af2a6052aeb6cf17d3e46ee169099044fd8224cbaf75c76a2ef596e8163e2237", size = 13305, upload-time = "2025-10-08T19:49:00.792Z" },
+]
+
+[[package]]
+name = "py-builder-relayer-client"
+version = "0.0.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "eth-abi" },
+    { name = "eth-account" },
+    { name = "eth-utils" },
+    { name = "hexbytes" },
+    { name = "py-builder-signing-sdk" },
+    { name = "python-dotenv" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f0/85/bca9addadc53e186fcb302e56955f08fabbe8db8d8f3f9da1beb2f1e212e/py_builder_relayer_client-0.0.2.tar.gz", hash = "sha256:6e570b0cbcd59115745daad3dfb4196c1ae4713771e7b66000731a836bf0e73c", size = 21038, upload-time = "2026-05-29T14:49:48.786Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7d/9a/166109f2023d16715fcac8581893619303632280d84f8d71aa2509bcada1/py_builder_relayer_client-0.0.2-py3-none-any.whl", hash = "sha256:a5c34fff4aff412c4cec46139f89b9df4ce8719a39a167b0c18521ac90ac9463", size = 31910, upload-time = "2026-05-29T14:49:47.67Z" },
+]
+
+[[package]]
+name = "py-builder-signing-sdk"
+version = "0.0.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "python-dotenv" },
+    { name = "requests" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/18/e3/fab3253021a4d766345f491f00e40d89c7c5640bf6d20d9f5a3182b482de/py_builder_signing_sdk-0.0.2.tar.gz", hash = "sha256:27fa4401944220c51809f549a263c6e53b5cd981fca98eda7ef6f21944e6bf94", size = 6411, upload-time = "2025-10-20T22:17:56.658Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/57/fb/23c68c8f6356a50f959e2df2ae80e8344c3ff8ccca92943848a57a495928/py_builder_signing_sdk-0.0.2-py3-none-any.whl", hash = "sha256:114b9d57bec228177d759ce15c475589f47db2252ed1fd67cac3c9b0640abe76", size = 9082, upload-time = "2025-10-20T22:17:55.629Z" },
 ]
 
 [[package]]

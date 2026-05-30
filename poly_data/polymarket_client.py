@@ -5,6 +5,12 @@ import os                           # Operating system interface
 from py_clob_client_v2 import ClobClient, OrderArgs, PartialCreateOrderOptions, OrderMarketCancelParams, OrderType
 from py_clob_client_v2.constants import POLYGON
 
+# Polymarket Relayer API client (gas-free PROXY/SAFE meta-transactions; used for merges)
+from py_builder_relayer_client.client import RelayClient
+from py_builder_relayer_client.models import RelayerTxType, Transaction
+from py_builder_signing_sdk.config import BuilderConfig
+from py_builder_signing_sdk.sdk_types import BuilderApiKeyCreds
+
 # Web3 libraries for blockchain interaction
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
@@ -13,7 +19,6 @@ from eth_account import Account
 import requests                     # HTTP requests
 import pandas as pd                 # Data analysis
 import json                         # JSON processing
-import subprocess                   # For calling external processes
 
 from py_clob_client_v2 import OpenOrderParams
 
@@ -84,7 +89,11 @@ class PolymarketClient:
         self.addresses = {
             'neg_risk_adapter': '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296',
             'collateral': '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
-            'conditional_tokens': '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045'
+            'conditional_tokens': '0x4D97DCd97eC945f40cF65F87097ACe5EA0476045',
+            # CLOB v2 collateral adapters: merge/redeem through these so proceeds
+            # are returned as pUSD (the v2 collateral) instead of USDC.e.
+            'ctf_collateral_adapter': '0xAdA100Db00Ca00073811820692005400218FcE1f',
+            'neg_risk_ctf_collateral_adapter': '0xadA2005600Dec949baf300f4C6120000bDB6eAab',
         }
 
         # Initialize contract interfaces
@@ -100,7 +109,46 @@ class PolymarketClient:
 
         self.web3 = web3
 
-    
+        # ----- Polymarket Relayer API client (used by merge_positions) -----
+        # Submit merges as gas-free meta-transactions through the Polymarket Relayer.
+        # The relay type tracks the CLOB signature_type so merges use the same wallet
+        # model as trading: 1 (POLY_PROXY) -> PROXY, 2 (POLY_GNOSIS_SAFE) -> SAFE.
+        self.relay_tx_type = RelayerTxType.PROXY if signature_type == 1 else RelayerTxType.SAFE
+
+        builder_config = self._build_builder_config()
+        if builder_config is None:
+            print(
+                "WARNING: Builder API credentials not set "
+                "(BUILDER_API_KEY/BUILDER_SECRET/BUILDER_PASSPHRASE); "
+                "merge_positions() will fail until they are added to .env."
+            )
+
+        self.relay_client = RelayClient(
+            "https://relayer-v2.polymarket.com",
+            chain_id,
+            private_key=key,
+            builder_config=builder_config,
+            relay_tx_type=self.relay_tx_type,
+            rpc_url="https://polygon-rpc.com",
+        )
+
+    def _build_builder_config(self):
+        """Load Builder API credentials from the environment into a BuilderConfig.
+
+        Returns None when any credential is missing so the client can still start;
+        merge_positions() raises a clear error if it is called without credentials.
+        """
+        key = os.getenv("BUILDER_API_KEY") or os.getenv("BUILDER_KEY")
+        secret = os.getenv("BUILDER_SECRET")
+        passphrase = os.getenv("BUILDER_PASSPHRASE") or os.getenv("BUILDER_PASS_PHRASE")
+        if not (key and secret and passphrase):
+            return None
+        return BuilderConfig(
+            local_builder_creds=BuilderApiKeyCreds(
+                key=key, secret=secret, passphrase=passphrase
+            )
+        )
+
     def create_order(self, marketId, action, price, size, neg_risk=False):
         """
         Create and submit a new order to the Polymarket order book.
@@ -284,38 +332,72 @@ class PolymarketClient:
     
     def merge_positions(self, amount_to_merge, condition_id, is_neg_risk_market):
         """
-        Merge positions in a market to recover collateral.
-        
-        This function calls the external poly_merger Node.js script to execute
-        the merge operation on-chain. When you hold both YES and NO positions
-        in the same market, merging them recovers your USDC.
-        
+        Merge complementary YES+NO positions back into collateral via the
+        Polymarket Relayer API.
+
+        Routes a CTF ``mergePositions`` call through the CLOB v2 collateral adapter,
+        which performs the merge on the underlying ConditionalTokens contract and
+        returns the proceeds as pUSD (the v2 collateral). The relayer submits it as a
+        gas-free PROXY/SAFE meta-transaction, so no on-chain tx is sent from the EOA.
+
         Args:
-            amount_to_merge (int): Raw token amount to merge (before decimal conversion)
-            condition_id (str): Market condition ID
-            is_neg_risk_market (bool): Whether this is a negative risk market
-            
+            amount_to_merge (int): Raw token amount to merge (6-decimal base units).
+            condition_id (str): Market condition id (0x-prefixed 32-byte hex).
+            is_neg_risk_market (bool): Whether this is a negative-risk market.
+
         Returns:
-            str: Transaction hash or output from the merge script
-            
+            str: The on-chain transaction hash.
+
         Raises:
-            Exception: If the merge operation fails
+            Exception: If builder credentials are missing or the merge fails/times out.
         """
-        amount_to_merge_str = str(amount_to_merge)
+        if self.relay_client.builder_config is None:
+            raise Exception(
+                "Cannot merge: Builder API credentials missing. Set BUILDER_API_KEY, "
+                "BUILDER_SECRET and BUILDER_PASSPHRASE in .env."
+            )
 
-        # Prepare the command to run the JavaScript script
-        node_command = f'node poly_merger/merge.js {amount_to_merge_str} {condition_id} {"true" if is_neg_risk_market else "false"}'
-        print(node_command)
+        # Route through the v2 collateral adapter so proceeds come back as pUSD. Both
+        # adapters expose the same 5-arg mergePositions selector, so the calldata is
+        # identical -- only the target address differs.
+        adapter = Web3.to_checksum_address(
+            self.addresses['neg_risk_ctf_collateral_adapter']
+            if is_neg_risk_market
+            else self.addresses['ctf_collateral_adapter']
+        )
 
-        # Run the command and capture the output
-        result = subprocess.run(node_command, shell=True, capture_output=True, text=True)
-        
-        # Check if there was an error
-        if result.returncode != 0:
-            print("Error:", result.stderr)
-            raise Exception(f"Error in merging positions: {result.stderr}")
-        
-        print("Done merging")
+        # mergePositions(collateralToken, parentCollectionId, conditionId, partition, amount)
+        # collateralToken stays USDC.e: that is how the underlying CTF identifies the
+        # positions to burn; the adapter wraps the returned USDC.e into pUSD.
+        calldata = self.conditional_tokens.encode_abi(
+            abi_element_identifier="mergePositions",
+            args=[
+                Web3.to_checksum_address(self.addresses['collateral']),
+                bytes(32),                            # parentCollectionId (ZERO_BYTES32)
+                Web3.to_bytes(hexstr=condition_id),   # conditionId (bytes32)
+                [1, 2],                               # partition (YES / NO)
+                int(amount_to_merge),
+            ],
+        )
 
-        # Return the transaction hash or output
-        return result.stdout
+        print(
+            f"Merging {amount_to_merge} via relayer "
+            f"({self.relay_tx_type.value}, neg_risk={is_neg_risk_market}) "
+            f"through adapter {adapter}"
+        )
+
+        resp = self.relay_client.execute(
+            [Transaction(to=adapter, data=calldata, value="0")],
+            "merge positions",
+        )
+        result = resp.wait()  # txn dict on mined/confirmed, None on failure/timeout
+
+        if not result:
+            raise Exception(
+                f"Error in merging positions: relayer transaction "
+                f"{resp.transaction_id} failed or timed out"
+            )
+
+        tx_hash = result.get("transactionHash") or resp.transaction_hash
+        print(f"Done merging. tx={tx_hash}")
+        return tx_hash

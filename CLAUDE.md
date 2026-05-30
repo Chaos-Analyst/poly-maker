@@ -17,13 +17,13 @@
 
 ## Repo norms
 - Dependencies are managed with **`uv`** (`uv sync`, `uv lock`, `uv run python ...`). Python 3.9.
-- `poly_merger/` is a **Node.js** subproject (called via `subprocess`); `npm install` there.
-- Secrets live in `.env` (`PK`, `BROWSER_ADDRESS`, `SPREADSHEET_URL`, optional `SIGNATURE_TYPE`).
+- Secrets live in `.env` (`PK`, `BROWSER_ADDRESS`, `SPREADSHEET_URL`, optional `SIGNATURE_TYPE`;
+  `BUILDER_API_KEY`/`BUILDER_SECRET`/`BUILDER_PASSPHRASE` for relayer merges).
 - Config/markets come from a Google Sheet (see README).
 
 ## Project shape
 - `poly_data/polymarket_client.py` — `PolymarketClient`, the wrapper around the Polymarket CLOB client
-  (orders, order book, cancels) + web3 (USDC/CTF balances, merge via `poly_merger`).
+  (orders, order book, cancels) + web3 (USDC/CTF balances) + relayer-based position merging.
 - `poly_data/` — websockets, data processing, global state, the market-making data layer.
 - `trading.py` — the market-making strategy (consumes `global_state.client`, the wrapper).
 - `data_updater/` — separate market-discovery tooling (`update_markets.py`, `find_markets.py`).
@@ -61,12 +61,25 @@ the `SIGNATURE_TYPE` env var (default `1`). The wrapper's public interface is un
 docs that the live `book` / `price_change` (`price_changes[]`) / user `trade`/`order` schemas match what
 `data_processing.py` already parses — so it was left unchanged in the migration.
 
+## Merges: Polymarket Relayer API (pUSD)
+`PolymarketClient.merge_positions` submits a CTF `mergePositions` call through the **official
+`py-builder-relayer-client`** (gas-free PROXY/SAFE meta-tx; relay type tracks `SIGNATURE_TYPE`: 1→PROXY,
+2→SAFE) — no Node.js, no EOA tx. It targets the **CLOB v2 collateral adapters**: `CtfCollateralAdapter`
+`0xAdA100Db00Ca00073811820692005400218FcE1f` (standard) / `NegRiskCtfCollateralAdapter`
+`0xadA2005600Dec949baf300f4C6120000bDB6eAab` (neg-risk), passing **USDC.e** as the `collateralToken` arg
+(that's how the underlying CTF identifies the positions to burn) so the adapter returns the proceeds as
+**pUSD**. Calldata is the same 5-arg `mergePositions(address,bytes32,bytes32,uint256[],uint256)` for both;
+only the `to` adapter differs. Needs Builder API creds in `.env`. The old Node.js `poly_merger/` subproject
+was removed.
+
 ## Known follow-ups (deferred, not done yet)
 - **On-chain V2 approvals must be run once.** `data_updater/trading_utils.py:approveContracts()` was
   updated to include the CTF Exchange V2 contracts (`0xE111180000d2663C0091e4f400237545B87B996B`,
   neg-risk `0xe2222d279d744050d28e00520010520000310F59`) — but executing it is a manual step, and for a
   POLY_PROXY (sig type 1) funder, approvals normally come from the proxy (Polymarket "enable trading" UI),
-  not the bare EOA. Orders won't settle on Exchange V2 until approvals exist.
+  not the bare EOA. Orders won't settle on Exchange V2 until approvals exist. Likewise, relayer **merges**
+  require the proxy to have approved the v2 collateral adapters as ERC-1155 operators on the CTF
+  (`0x4D97…`) — normally set by the same "enable trading" UI step.
 - v2 caches a token's tick size after first use; a long-running bot can hit a stale tick size if a market's
   tick changes (near 0.04/0.96), causing rejects. Mitigation (deferred): pass `tick_size` from the sheet.
 - WS hardening (app-level `PING` every 10s; handle `tick_size_change`) and rewriting
