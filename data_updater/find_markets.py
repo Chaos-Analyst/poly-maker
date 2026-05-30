@@ -6,6 +6,8 @@ import time
 import warnings
 warnings.filterwarnings("ignore")
 
+from py_clob_client_v2.constants import INITIAL_CURSOR, END_CURSOR
+
 
 if not os.path.exists('data'):
     os.makedirs('data')
@@ -20,7 +22,7 @@ def get_sel_df(spreadsheet, sheet_name='Selected Markets'):
         return pd.DataFrame()
     
 def get_all_markets(client):
-    cursor = ""
+    cursor = INITIAL_CURSOR
     all_markets = []
 
     while True:
@@ -30,12 +32,13 @@ def get_all_markets(client):
 
 
             cursor = markets['next_cursor']
-            
+
 
 
             all_markets.append(markets_df)
 
-            if cursor is None:
+            # v2 signals the end of pagination with END_CURSOR ("LTE="), not None
+            if cursor is None or cursor == END_CURSOR:
                 break
         except:
             break
@@ -139,12 +142,12 @@ def process_single_row(row, client):
     asks = pd.DataFrame()
 
     try:
-        bids = pd.DataFrame(book.bids).astype(float)
+        bids = pd.DataFrame(book['bids']).astype(float)
     except:
         pass
 
     try:
-        asks = pd.DataFrame(book.asks).astype(float)
+        asks = pd.DataFrame(book['asks']).astype(float)
     except:
         pass
 

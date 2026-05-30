@@ -1,7 +1,6 @@
-from py_clob_client.constants import POLYGON
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, BalanceAllowanceParams, AssetType
-from py_clob_client.order_builder.constants import BUY
+from py_clob_client_v2.constants import POLYGON
+from py_clob_client_v2 import ClobClient, OrderArgs, BalanceAllowanceParams, AssetType
+from py_clob_client_v2.order_builder.constants import BUY
 
 from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
@@ -29,7 +28,7 @@ def get_clob_client():
 
     try:
         client = ClobClient(host, key=key, chain_id=chain_id)
-        api_creds = client.create_or_derive_api_creds()
+        api_creds = client.create_or_derive_api_key()
         client.set_api_creds(api_creds)
         return client
     except Exception as ex: 
@@ -55,7 +54,11 @@ def approveContracts():
     ctf_contract = web3.eth.contract(address=ctf_address, abi=erc1155_set_approval)
     
 
-    for address in ['0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E', '0xC5d563A36AE78145C45a50134d48A1215220f80a', '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296']:
+    # v1 CTF Exchange + v1 neg-risk exchange + neg-risk adapter, plus the new CTF Exchange V2 contracts
+    # (exchange_v2 and neg_risk_exchange_v2). v2-signed orders settle on these, so they need approvals too.
+    # NOTE: for a POLY_PROXY (signature_type=1) funder, approvals normally come from the proxy wallet via
+    # Polymarket's "enable trading" UI; this helper approves from the EOA (os.getenv("PK")).
+    for address in ['0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E', '0xC5d563A36AE78145C45a50134d48A1215220f80a', '0xd91E80cF2E7be2e162c6513ceD06f1dD0dA35296', '0xE111180000d2663C0091e4f400237545B87B996B', '0xe2222d279d744050d28e00520010520000310F59']:
         usdc_nonce = web3.eth.get_transaction_count( wallet.address )
         raw_usdc_txn = usdc_contract.functions.approve(address, int(MAX_INT, 0)).build_transaction({
             "chainId": 137, 
@@ -132,6 +135,6 @@ def get_position(marketId):
         )
     )
     orderBook = client.get_order_book(marketId)
-    price = float(orderBook.bids[-1].price)
+    price = float(orderBook['bids'][-1]['price'])
     shares = int(position_res['balance']) / 1e6
     return shares * price
