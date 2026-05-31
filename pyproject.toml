@@ -16,6 +16,7 @@ dependencies = [
     "poly_eip712_structs==0.0.1",
     "py_order_utils==0.3.2",
     "requests==2.32.5",
+    "httpx==0.28.1",
     "websockets==15.0.1",
     "cryptography==46.0.3",
     "web3==7.14.0",

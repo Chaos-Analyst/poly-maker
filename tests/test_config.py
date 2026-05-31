@@ -81,9 +81,39 @@ def test_max_size_defaults_to_trade_size_when_blank(seed_markets, monkeypatch):
     assert df.iloc[0]["max_size"] == 10.0
 
 
-def test_missing_required_env_raises_clear_error(seed_markets, monkeypatch):
+def test_missing_required_hyperparam_raises_clear_error(seed_markets, monkeypatch):
     for k, v in REQUIRED_ENV.items():
         monkeypatch.setenv(k, v)
-    monkeypatch.delenv("TRADE_SIZE", raising=False)
-    with pytest.raises(ValueError, match="TRADE_SIZE"):
+    monkeypatch.delenv("STOP_LOSS_THRESHOLD", raising=False)
+    with pytest.raises(ValueError, match="STOP_LOSS_THRESHOLD"):
         utils.get_market_df()
+
+
+def test_trade_size_unset_uses_per_market_min_size(seed_markets, monkeypatch):
+    # TRADE_SIZE and MAX_SIZE blank -> size each market at its own min_size.
+    for k in (
+        "STOP_LOSS_THRESHOLD",
+        "SPREAD_THRESHOLD",
+        "VOLATILITY_THRESHOLD",
+        "SLEEP_PERIOD",
+        "TAKE_PROFIT_THRESHOLD",
+    ):
+        monkeypatch.setenv(k, REQUIRED_ENV[k])
+    monkeypatch.delenv("TRADE_SIZE", raising=False)
+    monkeypatch.delenv("MAX_SIZE", raising=False)
+    monkeypatch.setenv("MULTIPLIER", "")
+
+    df, _ = utils.get_market_df()
+    row = df.iloc[0]
+    assert row["trade_size"] == 15.0  # the seeded market's min_size
+    assert row["max_size"] == 15.0  # defaults to trade_size
+    assert row["min_size"] == 15.0  # blank TRADE_SIZE leaves the real min_size in place
+
+
+def test_fixed_trade_size_overrides_min_size(seed_markets, full_env):
+    # Seeded market has min_size=15; with TRADE_SIZE=10 the bot must ignore 15 and use 10,
+    # so the buy gate (buy_amount >= min_size) lets a 10-share order through.
+    df, _ = utils.get_market_df()
+    row = df.iloc[0]
+    assert row["trade_size"] == 10.0
+    assert row["min_size"] == 10.0  # overridden to trade_size

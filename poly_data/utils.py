@@ -49,11 +49,17 @@ def get_market_df():
     Returns ``(df, params)`` with the same shape the old Sheets reader returned, so
     data_utils/trading consume it unchanged. The per-market sizing/grouping fields
     that used to live in the Selected Markets sheet (trade_size, max_size,
-    multiplier, param_type) are injected here as global, .env-driven values.
+    multiplier, param_type) are injected here from .env.
+
+    ``TRADE_SIZE`` is optional: leave it blank to size each market at its own
+    ``min_size`` (the smallest reward-qualifying order). Set it to force one fixed size
+    on every market and **ignore** each market's reward ``min_size`` -- the bot will then
+    place orders even below the reward threshold (good for plain trading; those orders
+    just won't earn rewards). ``MAX_SIZE`` blank means "same as trade_size".
     """
     params = get_params_from_env()
 
-    trade_size = _required_float("TRADE_SIZE")
+    trade_size = _optional_float("TRADE_SIZE")
     max_size = _optional_float("MAX_SIZE")
     multiplier = os.getenv("MULTIPLIER", "") or ""
 
@@ -61,8 +67,20 @@ def get_market_df():
     if len(df) > 0 and "question" in df.columns:
         df = df[df["question"] != ""].reset_index(drop=True)
 
-    df["trade_size"] = trade_size
-    df["max_size"] = max_size if max_size is not None else trade_size
+    # Order size per market: a fixed TRADE_SIZE if set, else each market's own min_size.
+    if trade_size is not None:
+        df["trade_size"] = trade_size
+        # Explicit TRADE_SIZE: trade exactly this size and IGNORE each market's reward
+        # min_size. trading.py gates buys on row['min_size'] (buy_amount >= min_size) and
+        # uses it for sizing heuristics, so override min_size to trade_size to honor it.
+        df["min_size"] = trade_size
+    elif "min_size" in df.columns:
+        df["trade_size"] = pd.to_numeric(df["min_size"], errors="coerce")
+    else:
+        df["trade_size"] = float("nan")
+
+    # Max inventory per side before it only sells; MAX_SIZE if set, else == trade_size.
+    df["max_size"] = max_size if max_size is not None else df["trade_size"]
     df["multiplier"] = multiplier
     df["param_type"] = "default"
 

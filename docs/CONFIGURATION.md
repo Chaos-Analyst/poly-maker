@@ -17,7 +17,7 @@ This document records **what used to be hand-edited**, **what each setting means
 | Stop-loss cooldown per market | local `positions/*.json` | Postgres table **`risk_state`** |
 | Strategy hyperparameters | Hyperparameters | **`.env`** (5 vars) |
 | Position sizing | Selected Markets (per row) | **`.env`** (3 vars) |
-| Which markets to trade | Selected Markets (hand-picked) | **Removed** — trades every discovered market (see below) |
+| Which markets to trade | Selected Markets (hand-picked) | **Sports-only** — today/live games chosen by the updater (see below) |
 
 All three processes — the bot (`main.py`), the updater (`update_markets.py`), and the
 stats job (`update_stats.py`) — read their database connection from `DATABASE_URL`, so
@@ -64,16 +64,31 @@ VOLATILITY_THRESHOLD=200
 SLEEP_PERIOD=6
 TAKE_PROFIT_THRESHOLD=3
 
-# Position sizing (was per-market in Selected Markets) — now global defaults.
-TRADE_SIZE=10
-MAX_SIZE=30
+# Position sizing. TRADE_SIZE blank -> each market's own min_size; set -> fixed everywhere.
+# MAX_SIZE blank -> same as trade_size (hold at most one lot per side).
+TRADE_SIZE=
+MAX_SIZE=
 MULTIPLIER=          # blank disables the low-price multiplier
 ```
 
 Loaded in `poly_data/utils.py:get_market_df()`, which reads the `markets` table and
 injects `trade_size` / `max_size` / `multiplier` / `param_type='default'` as columns so
-the strategy code (`trading.py`, `trading_utils.py`) is unchanged. Missing a required var
-raises a clear error at startup rather than failing mid-trade.
+the strategy code (`trading.py`, `trading_utils.py`) is unchanged. Missing a required
+*hyperparameter* raises a clear error at startup rather than failing mid-trade.
+
+`TRADE_SIZE` is **optional**:
+
+- **Blank** → each market is sized at its own `min_size` (the smallest reward-qualifying
+  order). Because `trading.py` gates buys on `buy_amount >= row['min_size']`, this is also
+  the smallest size the bot will place — so blank means "post each market's minimum."
+- **Set to a number** → that fixed size on every market, and each market's `min_size` is
+  overridden to it (in `get_market_df`), so the `buy_amount >= min_size` gate uses your
+  size. This lets the bot place orders **below** a market's reward threshold — fine for
+  plain trading, but such orders earn no rewards. Keep it large enough that
+  `TRADE_SIZE × price ≥ $1` (Polymarket's minimum order; the bot only quotes prices
+  0.1–0.9, so ~10+ shares stays safe).
+
+`MAX_SIZE` blank means "same as `trade_size`" (hold at most one lot per side).
 
 > The Hyperparameters tab supported several `type` groups (e.g. aggressive/conservative).
 > That grouping is **collapsed to one global set**. When migrating, pick the set you want
@@ -83,15 +98,45 @@ raises a clear error at startup rather than failing mid-trade.
 
 ## Which markets get traded
 
-The human allow-list (*Selected Markets*) is **gone**. The bot now trades **every market
-the updater writes to the `markets` table**.
+The bot trades **every market the updater writes to the `markets` table**. The updater
+restricts that table to **today/live sport game markets** that also pay maker rewards — two
+stages joined on `condition_id`:
 
-The updater (`update_markets.py` → `data_updater/find_markets.py:get_markets`) keeps every
-market whose `gm_reward_per_100 >= maker_reward` (currently `0.75`, passed in
-`update_markets.py`). That reward floor is the one knob defining the traded universe.
+1. **Sport membership** (`data_updater/sports.py`): the Polymarket **Gamma API**
+   (`/events?tag_slug=…`) is queried per enabled sport and filtered to individual *games*:
+   - **soccer** — moneyline / totals / both-teams-to-score (event title without "winner")
+   - **tennis** — singles moneyline (dated slug, "doubles" excluded)
+   - **nba / nhl / mlb** — moneyline / totals
+   - **esports** — CS2 + LoL moneyline (slug starting `cs2-` / `lol-`)
 
-⚠️ **Exposure:** `TRADE_SIZE` now applies to *every* such market simultaneously. Total
-capital at risk ≈ `TRADE_SIZE × (number of markets above the reward floor)`. Start small.
+   A market is in-universe only if its event has a **dated slug** (`YYYY-MM-DD` — which excludes
+   season-long futures like `world-cup-winner` / `2026-nba-champion`) and is **live now or
+   resolves within `SPORTS_HORIZON_HOURS`** (default 36). Ended games drop out automatically
+   because they leave the reward feed.
+2. **Reward floor** (existing logic): of those, keep markets with
+   `gm_reward_per_100 >= MAKER_REWARD` (default `0.75`). Reward/volatility columns are computed
+   exactly as before; only the input set is smaller.
+
+| Env var | Default | Meaning |
+|---------|---------|---------|
+| `SPORTS_TAG_SLUGS` | all six | Comma-separated subset of `soccer,tennis,nba,nhl,mlb,esports` to enable |
+| `SPORTS_HORIZON_HOURS` | `36` | How far ahead a game may resolve and still count as "today" |
+| `MAKER_REWARD` | `0.75` | Reward floor (`gm_reward_per_100`) |
+| `UPDATE_INTERVAL_SECONDS` | `900` | Updater refresh cadence (was a hard-coded hour) |
+| `MIN_MARKETS_TO_WRITE` | `1` | Anti-wipe: skip the write if fewer markets pass |
+
+The `markets` table gains a `sport` column (the tag that selected each row); `trading.py`
+ignores it.
+
+### Single-market override
+
+Set `SINGLE_MARKET_ENABLED=true` and `SINGLE_MARKET_CONDITION_IDS=0x…,0x…` to trade **only**
+those markets, bypassing the sport filter **and** the reward floor (see
+`data_updater/single_market.py`). Only ids present in the CLOB reward feed are picked up; any
+others are logged and skipped.
+
+⚠️ **Exposure:** `TRADE_SIZE` applies to *every* market in the table simultaneously. Total
+capital at risk ≈ `TRADE_SIZE × (number of markets in the table)`. Start small.
 
 ---
 
