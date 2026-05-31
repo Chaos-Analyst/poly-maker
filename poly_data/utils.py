@@ -26,6 +26,13 @@ def _optional_float(name):
     return float(val)
 
 
+def _optional_bool(name, default):
+    val = os.getenv(name)
+    if val is None or str(val).strip() == "":
+        return default
+    return str(val).strip().lower() in ("1", "true", "yes", "on")
+
+
 def get_params_from_env():
     """The five strategy hyperparameters as one global set (was the Hyperparameters sheet).
 
@@ -39,6 +46,22 @@ def get_params_from_env():
             "volatility_threshold": _required_float("VOLATILITY_THRESHOLD"),
             "sleep_period": _required_float("SLEEP_PERIOD"),
             "take_profit_threshold": _required_float("TAKE_PROFIT_THRESHOLD"),
+            # Behavior switches; defaults preserve the original market-making behavior.
+            # ENABLE_SELLING=false  -> never place a market SELL (no stop-loss / take-profit).
+            # BUILD_BOTH_SIDES=true -> accumulate YES and NO and merge them (delta-neutral).
+            "enable_selling": _optional_bool("ENABLE_SELLING", True),
+            "build_both_sides": _optional_bool("BUILD_BOTH_SIDES", False),
+            # Delta-neutral knobs (only used when build_both_sides is on):
+            # MAX_IMBALANCE         -> max shares one side may lead the other before we pause
+            #                          buying the leading side (blank = fall back to trade_size).
+            # MERGE_COLLATERAL_FLOOR-> proactively merge mergeable pairs when free collateral
+            #                          drops below this (blank = only merge on a balance error).
+            "max_imbalance": _optional_float("MAX_IMBALANCE"),
+            "merge_collateral_floor": _optional_float("MERGE_COLLATERAL_FLOOR"),
+            # POST_ONLY=true (default): buy orders are maker-only -- if one would cross and fill as a
+            # taker it's rejected instead, keeping every fill reward-eligible. Applies to buys only;
+            # sells (e.g. a stop-loss) still execute normally.
+            "post_only": _optional_bool("POST_ONLY", True),
         }
     }
 

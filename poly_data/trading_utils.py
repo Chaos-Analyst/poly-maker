@@ -149,6 +149,19 @@ def round_up(number, decimals):
     factor = 10 ** decimals
     return math.ceil(number * factor) / factor
 
+def delta_neutral_buy_amount(position, other_position, row, max_imbalance):
+    """How much to buy on this side in build-both-sides (delta-neutral) mode.
+
+    Returns ``trade_size`` unless this side is already ahead of the other side by more than
+    ``max_imbalance`` shares -- then 0, so the lagging side can catch up and the pair stays
+    balanced (and therefore mergeable). Total growth is bounded by collateral + merging, not
+    by a per-side cap, which is what avoids the old max_size deadlock.
+    """
+    if position > other_position + max_imbalance:
+        return 0
+    return row['trade_size']
+
+
 def get_buy_sell_amount(position, bid_price, row, other_token_position=0):
     buy_amount = 0
     sell_amount = 0

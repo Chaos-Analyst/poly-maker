@@ -8,7 +8,7 @@ import poly_data.global_state as global_state
 import poly_data.CONSTANTS as CONSTANTS
 
 # Import utility functions for trading
-from poly_data.trading_utils import get_best_bid_ask_deets, get_order_prices, get_buy_sell_amount, round_down, round_up
+from poly_data.trading_utils import get_best_bid_ask_deets, get_order_prices, get_buy_sell_amount, delta_neutral_buy_amount, round_down, round_up
 from poly_data.data_utils import get_position, get_order, set_position
 from poly_utils import db
 
@@ -61,17 +61,20 @@ def send_buy_order(order):
         if order['price'] >= 0.1 and order['price'] < 0.9:
             print(f'Creating new order for {order["size"]} at {order["price"]}')
             print(order['token'], 'BUY', order['price'], order['size'])
-            client.create_order(
-                order['token'], 
-                'BUY', 
-                order['price'], 
-                order['size'], 
-                True if order['neg_risk'] == 'TRUE' else False
+            return client.create_order(
+                order['token'],
+                'BUY',
+                order['price'],
+                order['size'],
+                True if order['neg_risk'] == 'TRUE' else False,
+                post_only=order.get('post_only', False)
             )
         else:
             print("Not creating buy order because its outside acceptable price range (0.1-0.9)")
     else:
         print(f'Not creating new order because order price of {order["price"]} is less than incentive start price of {incentive_start}. Mid price is {order["mid_price"]}')
+
+    return None
 
 
 def send_sell_order(order):
@@ -117,6 +120,44 @@ def send_sell_order(order):
         True if order['neg_risk'] == 'TRUE' else False
     )
 
+def merge_mergeable_pairs():
+    """Scan every traded market for held YES+NO pairs and merge them back into collateral.
+
+    This is the balance-driven recycling used in delta-neutral (build-both-sides) mode -- it
+    replaces the old per-cycle constant-gated merge. It is called when an order is rejected for
+    insufficient balance/allowance, or when free collateral drops below the configured floor.
+    Merges the matched (min) amount of each pair via the relayer and updates local positions.
+    Returns True if at least one pair was merged.
+    """
+    client = global_state.client
+    if global_state.df is None or len(global_state.df) == 0:
+        return False
+
+    merged_any = False
+    for _, row in global_state.df.iterrows():
+        try:
+            t1, t2 = str(row['token1']), str(row['token2'])
+            # On-chain truth; get_position already zeroes dust (<1 share).
+            raw1, sh1 = client.get_position(t1)
+            raw2, sh2 = client.get_position(t2)
+
+            if sh1 >= 1 and sh2 >= 1:
+                amount_to_merge = min(raw1, raw2)          # raw 6-decimal base units
+                scaled_amt = amount_to_merge / 10**6        # shares
+                print(f"Merging pair for {row['question']}: {sh1}/{sh2} shares -> {scaled_amt}")
+                client.merge_positions(amount_to_merge, row['condition_id'], row['neg_risk'] == 'TRUE')
+                set_position(t1, 'SELL', scaled_amt, 0, 'merge')
+                set_position(t2, 'SELL', scaled_amt, 0, 'merge')
+                merged_any = True
+        except Exception as ex:
+            print(f"Error merging pair for {row.get('question', '?')}: {ex}")
+            traceback.print_exc()
+
+    if not merged_any:
+        print("merge_mergeable_pairs: no mergeable pairs found")
+    return merged_any
+
+
 # Dictionary to store locks for each market to prevent concurrent trading on the same market
 market_locks = {}
 
@@ -160,12 +201,14 @@ async def perform_trade(market):
             pos_1 = get_position(row['token1'])['size']
             pos_2 = get_position(row['token2'])['size']
 
-            # ------- POSITION MERGING LOGIC -------
-            # Calculate if we have opposing positions that can be merged
+            # ------- POSITION MERGING (legacy mode only) -------
+            # In build-both-sides (delta-neutral) mode, merging is balance-driven via
+            # merge_mergeable_pairs() -- not gated on a per-market size constant -- so skip
+            # this per-cycle path there.
             amount_to_merge = min(pos_1, pos_2)
-            
+
             # Only merge if positions are above minimum threshold
-            if float(amount_to_merge) > CONSTANTS.MIN_MERGE_SIZE:
+            if not params['build_both_sides'] and float(amount_to_merge) > CONSTANTS.MIN_MERGE_SIZE:
                 # Get exact position sizes from blockchain for merging
                 pos_1 = client.get_position(row['token1'])[0]
                 pos_2 = client.get_position(row['token2'])[0]
@@ -179,7 +222,16 @@ async def perform_trade(market):
                     # Update our local position tracking
                     set_position(row['token1'], 'SELL', scaled_amt, 0, 'merge')
                     set_position(row['token2'], 'SELL', scaled_amt, 0, 'merge')
-                    
+
+            # ------- PROACTIVE MERGE (delta-neutral mode) -------
+            # If a collateral floor is configured, recycle capital by merging mergeable pairs
+            # once free (spendable) collateral drops below it -- before trying to quote.
+            if params['build_both_sides'] and params['merge_collateral_floor'] is not None:
+                free_collateral = client.get_collateral_balance()
+                if free_collateral is not None and free_collateral < params['merge_collateral_floor']:
+                    print(f"Free collateral {free_collateral} < floor {params['merge_collateral_floor']}; merging mergeable pairs")
+                    merge_mergeable_pairs()
+
             # ------- TRADING LOGIC FOR EACH OUTCOME -------
             # Loop through both outcomes in the market (YES and NO)
             for detail in deets:
@@ -256,7 +308,13 @@ async def perform_trade(market):
                 
                 # Calculate how much to buy or sell based on our position
                 buy_amount, sell_amount = get_buy_sell_amount(position, bid_price, row, other_position)
-                
+
+                # If selling is disabled, never place a market SELL. Both the stop-loss block
+                # and the take-profit block below are gated on sell_amount > 0, so zeroing it
+                # here makes every send_sell_order path unreachable (merge is unaffected).
+                if not params['enable_selling']:
+                    sell_amount = 0
+
                 # Get max_size for logging (same logic as in get_buy_sell_amount)
                 max_size = row.get('max_size', row['trade_size'])
 
@@ -268,12 +326,52 @@ async def perform_trade(market):
                     "max_spread": row['max_spread'],
                     'orders': orders,
                     'token_name': detail['name'],
-                    'row': row
+                    'row': row,
+                    'post_only': params['post_only'],
                 }
             
                 print(f"Position: {position}, Other Position: {other_position}, "
                       f"Trade Size: {row['trade_size']}, Max Size: {max_size}, "
                       f"buy_amount: {buy_amount}, sell_amount: {sell_amount}")
+
+                # ------- DELTA-NEUTRAL QUOTING (build both sides, never sell) -------
+                # Maintain one resting BUY of trade_size on each side, kept balanced within an
+                # imbalance tolerance so pairs stay mergeable. Inventory is recycled by merging
+                # (on a balance error, or below the collateral floor above), not by a size cap --
+                # this removes the old max_size deadlock. Skips all sell/stop-loss logic.
+                if params['build_both_sides']:
+                    max_imbalance = params['max_imbalance'] if params['max_imbalance'] is not None else row['trade_size']
+
+                    # Pause buying during high volatility (we never sell -- just stop adding).
+                    if row['3_hour'] > params['volatility_threshold']:
+                        print(f"Volatility {row['3_hour']} > {params['volatility_threshold']}: pausing buys for {token}")
+                        if orders['buy']['size'] > 0:
+                            client.cancel_all_asset(order['token'])
+                        continue
+
+                    # Keep sides balanced: don't add to a side already ahead of the other by
+                    # more than the tolerance; cancel its resting buy so the lagging side fills.
+                    nd_buy = delta_neutral_buy_amount(position, other_position, row, max_imbalance)
+                    if nd_buy <= 0:
+                        print(f"Holding {token}: position {position} leads other side {other_position} by > {max_imbalance}; not adding")
+                        if orders['buy']['size'] > 0:
+                            client.cancel_all_asset(order['token'])
+                        continue
+
+                    # Maintain one resting buy of trade_size at bid_price. send_buy_order only
+                    # replaces when price/size actually changed and enforces the 0.1-0.9 +
+                    # incentive-spread guards, so calling it each cycle is cheap.
+                    order['size'] = nd_buy
+                    order['price'] = bid_price
+                    resp = send_buy_order(order)
+
+                    # If rejected for insufficient balance/allowance, free collateral by merging
+                    # mergeable pairs, then retry the buy once.
+                    if client.is_balance_error(resp):
+                        print("Balance/allowance error on buy; merging mergeable pairs to free collateral")
+                        if merge_mergeable_pairs():
+                            send_buy_order(order)
+                    continue
 
                 # ------- SELL ORDER LOGIC -------
                 if sell_amount > 0:
@@ -385,8 +483,10 @@ async def perform_trade(market):
                             rev_token = global_state.REVERSE_TOKENS[str(token)]
                             rev_pos = get_position(rev_token)
 
-                            # If we have significant opposing position, don't buy more
-                            if rev_pos['size'] > row['min_size']:
+                            # If we have significant opposing position, don't buy more --
+                            # unless we're building both sides on purpose (delta-neutral mode),
+                            # where holding YES and NO together is what lets the merge flatten them.
+                            if not params['build_both_sides'] and rev_pos['size'] > row['min_size']:
                                 print("Bypassing creation of new buy order because there is a reverse position")
                                 if orders['buy']['size'] > CONSTANTS.MIN_MERGE_SIZE:
                                     print("Cancelling buy orders because there is a reverse position")

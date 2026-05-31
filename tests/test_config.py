@@ -73,6 +73,43 @@ def test_params_built_from_env(seed_markets, full_env):
     assert p["take_profit_threshold"] == 3.0
 
 
+def test_selling_and_both_sides_default_to_legacy_behavior(seed_markets, full_env, monkeypatch):
+    # Unset -> preserve original behavior: selling on, build-both-sides off.
+    monkeypatch.delenv("ENABLE_SELLING", raising=False)
+    monkeypatch.delenv("BUILD_BOTH_SIDES", raising=False)
+    _, params = utils.get_market_df()
+    p = params["default"]
+    assert p["enable_selling"] is True
+    assert p["build_both_sides"] is False
+
+
+def test_selling_and_both_sides_read_from_env(seed_markets, full_env, monkeypatch):
+    monkeypatch.setenv("ENABLE_SELLING", "false")
+    monkeypatch.setenv("BUILD_BOTH_SIDES", "true")
+    _, params = utils.get_market_df()
+    p = params["default"]
+    assert p["enable_selling"] is False
+    assert p["build_both_sides"] is True
+
+
+def test_delta_neutral_knobs_default_none(seed_markets, full_env, monkeypatch):
+    monkeypatch.delenv("MAX_IMBALANCE", raising=False)
+    monkeypatch.delenv("MERGE_COLLATERAL_FLOOR", raising=False)
+    _, params = utils.get_market_df()
+    p = params["default"]
+    assert p["max_imbalance"] is None
+    assert p["merge_collateral_floor"] is None
+
+
+def test_delta_neutral_knobs_read_from_env(seed_markets, full_env, monkeypatch):
+    monkeypatch.setenv("MAX_IMBALANCE", "25")
+    monkeypatch.setenv("MERGE_COLLATERAL_FLOOR", "12.5")
+    _, params = utils.get_market_df()
+    p = params["default"]
+    assert p["max_imbalance"] == 25.0
+    assert p["merge_collateral_floor"] == 12.5
+
+
 def test_max_size_defaults_to_trade_size_when_blank(seed_markets, monkeypatch):
     for k, v in REQUIRED_ENV.items():
         monkeypatch.setenv(k, v)

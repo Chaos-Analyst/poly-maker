@@ -2,7 +2,7 @@ from dotenv import load_dotenv          # Environment variable management
 import os                           # Operating system interface
 
 # Polymarket API client libraries
-from py_clob_client_v2 import ClobClient, OrderArgs, PartialCreateOrderOptions, OrderMarketCancelParams, OrderType
+from py_clob_client_v2 import ClobClient, OrderArgs, PartialCreateOrderOptions, OrderMarketCancelParams, OrderType, BalanceAllowanceParams, AssetType, ApiCreds
 from py_clob_client_v2.constants import POLYGON
 
 # Polymarket Relayer API client (gas-free PROXY/SAFE meta-transactions; used for merges)
@@ -58,11 +58,42 @@ class PolymarketClient:
         # Don't print sensitive wallet information
         print("Initializing Polymarket client...")
         chain_id=POLYGON
-        self.browser_wallet=Web3.to_checksum_address(browser_address)
+
+        # signature_type: 0=EOA, 1=POLY_PROXY (default), 2=POLY_GNOSIS_SAFE, 3=POLY_1271 (deposit wallet)
+        signature_type = int(os.getenv("SIGNATURE_TYPE", "1"))
+
+        # ---- Deposit-wallet (POLY_1271) funder check ----
+        # For signature_type=3 the funder MUST be the deposit wallet that THIS key owns. That wallet
+        # is deterministic from the signer key, so derive it and verify BROWSER_ADDRESS matches.
+        # Catches the common "the key and the funded wallet are different accounts" mistake up front
+        # with a clear message, instead of failing later with cryptic order/auth rejections.
+        if signature_type == 3:
+            from eth_account import Account as _Account
+            from py_builder_relayer_client.config import get_contract_config
+            from py_builder_relayer_client.builder.derive import derive_uups_deposit_wallet
+            _cfg = get_contract_config(chain_id)
+            _eoa = _Account.from_key(key).address
+            _derived = Web3.to_checksum_address(derive_uups_deposit_wallet(
+                _eoa, _cfg.deposit_wallet_factory, _cfg.deposit_wallet_implementation))
+            if not browser_address:
+                browser_address = _derived
+                print(f"BROWSER_ADDRESS not set; using deposit wallet derived from PK: {_derived}")
+            elif Web3.to_checksum_address(browser_address) != _derived:
+                raise ValueError(
+                    "Deposit-wallet mismatch (SIGNATURE_TYPE=3): the key in PK does not control "
+                    "BROWSER_ADDRESS.\n"
+                    f"  PK signer EOA       : {_eoa}\n"
+                    f"  PK's deposit wallet : {_derived}\n"
+                    f"  BROWSER_ADDRESS     : {Web3.to_checksum_address(browser_address)}\n"
+                    f"Fix: either put the owner key of {Web3.to_checksum_address(browser_address)} in PK, "
+                    f"or set BROWSER_ADDRESS={_derived} and fund THAT wallet."
+                )
+            else:
+                print(f"Deposit wallet verified: PK controls {_derived}")
+
+        self.browser_wallet = Web3.to_checksum_address(browser_address)
 
         # Initialize the Polymarket API client (CLOB v2)
-        # signature_type: 1=POLY_PROXY (default), 2=POLY_GNOSIS_SAFE, 3=POLY_1271 (deposit wallet)
-        signature_type = int(os.getenv("SIGNATURE_TYPE", "1"))
         self.client = ClobClient(
             host=host,
             chain_id=chain_id,
@@ -71,12 +102,27 @@ class PolymarketClient:
             signature_type=signature_type
         )
 
-        # Set up API credentials
-        self.creds = self.client.create_or_derive_api_key()
+        # Set up API credentials.
+        # Deposit wallets (POLY_1271 / signature_type=3) need the CLOB API key bound to the
+        # DEPOSIT WALLET, but create_or_derive_api_key() binds it to the EOA signer
+        # (py-clob-client-v2 L1-auth limitation), which makes orders fail with
+        # "the order signer address has to be the address of the API KEY". So, matching the
+        # docs' deposit-wallet example, accept ready-made creds from the environment when present.
+        clob_key = os.getenv("CLOB_API_KEY")
+        clob_secret = os.getenv("CLOB_SECRET")
+        clob_pass = os.getenv("CLOB_PASS_PHRASE") or os.getenv("CLOB_PASSPHRASE")
+        if clob_key and clob_secret and clob_pass:
+            print("Using CLOB API creds from env (CLOB_API_KEY/CLOB_SECRET/CLOB_PASS_PHRASE)")
+            self.creds = ApiCreds(api_key=clob_key, api_secret=clob_secret, api_passphrase=clob_pass)
+        else:
+            self.creds = self.client.create_or_derive_api_key()
         self.client.set_api_creds(creds=self.creds)
         
-        # Initialize Web3 connection to Polygon
-        web3 = Web3(Web3.HTTPProvider("https://polygon-rpc.com"))
+        # Initialize Web3 connection to Polygon. polygon-rpc.com now rate-limits/401s, so default to
+        # a reliable public node and allow override via RPC_URL (use your own Alchemy/Infura/QuickNode
+        # for production reliability).
+        rpc_url = os.getenv("RPC_URL") or "https://polygon-bor-rpc.publicnode.com"
+        web3 = Web3(Web3.HTTPProvider(rpc_url))
         web3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
         
         # Set up USDC contract for balance checks
@@ -113,6 +159,7 @@ class PolymarketClient:
         # Submit merges as gas-free meta-transactions through the Polymarket Relayer.
         # The relay type tracks the CLOB signature_type so merges use the same wallet
         # model as trading: 1 (POLY_PROXY) -> PROXY, 2 (POLY_GNOSIS_SAFE) -> SAFE.
+        self.signature_type = signature_type
         self.relay_tx_type = RelayerTxType.PROXY if signature_type == 1 else RelayerTxType.SAFE
 
         builder_config = self._build_builder_config()
@@ -129,7 +176,7 @@ class PolymarketClient:
             private_key=key,
             builder_config=builder_config,
             relay_tx_type=self.relay_tx_type,
-            rpc_url="https://polygon-rpc.com",
+            rpc_url=rpc_url,
         )
 
     def _build_builder_config(self):
@@ -149,7 +196,7 @@ class PolymarketClient:
             )
         )
 
-    def create_order(self, marketId, action, price, size, neg_risk=False):
+    def create_order(self, marketId, action, price, size, neg_risk=False, post_only=False):
         """
         Create and submit a new order to the Polymarket order book.
         
@@ -179,12 +226,50 @@ class PolymarketClient:
         )
 
         try:
-            # Submit the signed order to the API as a resting limit order (GTC)
-            resp = self.client.post_order(signed_order, OrderType.GTC)
+            # Submit the signed order to the API as a resting limit order (GTC). post_only=True
+            # makes it maker-only: if it would cross and execute as a taker, the API rejects it
+            # instead of filling -- keeping fills reward-eligible. (GTC supports post_only; FOK/FAK
+            # do not.)
+            resp = self.client.post_order(signed_order, OrderType.GTC, post_only=post_only)
             return resp
         except Exception as ex:
-            print(ex)
-            return {}
+            # Surface the failure (instead of swallowing to {}) so callers can detect an
+            # insufficient balance/allowance rejection and react (e.g. merge to free collateral).
+            if post_only:
+                # A post-only order that would cross is rejected by design -- a clean skip, not a bug.
+                print(f"Order not placed (post-only would cross/take, expected): {ex}")
+            else:
+                print(ex)
+            return {"success": False, "errorMsg": str(ex)}
+
+    @staticmethod
+    def is_balance_error(resp):
+        """True if an order response indicates an insufficient balance/allowance rejection.
+
+        The CLOB returns this either as a non-200 (surfaced here as an errorMsg string via
+        create_order's except block) or as a 200 body with success=false + errorMsg. We match
+        on the words 'balance'/'allowance' rather than an exact string to be wording-robust.
+        """
+        if not isinstance(resp, dict):
+            return False
+        msg = str(resp.get("errorMsg") or resp.get("error") or "").lower()
+        return "balance" in msg or "allowance" in msg
+
+    def get_collateral_balance(self):
+        """Free (spendable) CLOB collateral in whole units, or None if unavailable.
+
+        This is the authoritative "can I place more orders" balance (reflects funds tied up in
+        open orders/positions), used to decide when to merge mergeable pairs to recycle capital.
+        """
+        try:
+            resp = self.client.get_balance_allowance(
+                BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+            )
+            bal = resp.get("balance") if isinstance(resp, dict) else None
+            return float(bal) / 1e6 if bal is not None else None
+        except Exception as ex:
+            print(f"get_collateral_balance failed: {ex}")
+            return None
 
     def get_order_book(self, market):
         """
@@ -386,10 +471,29 @@ class PolymarketClient:
             f"through adapter {adapter}"
         )
 
-        resp = self.relay_client.execute(
-            [Transaction(to=adapter, data=calldata, value="0")],
-            "merge positions",
-        )
+        if self.signature_type == 3:
+            # Deposit wallet (POLY_1271): merges go through the relayer's WALLET batch flow, not
+            # PROXY/SAFE. The deposit wallet (funder) calls the adapter; the owner key signs the
+            # batch. NOTE: requires the deposit wallet to have approved the adapter as an ERC-1155
+            # operator on the CTF (normally done by Polymarket's "enable trading"); if the first
+            # merge reverts with an operator/allowance error, that approval still needs to be set.
+            import time as _time
+            from py_builder_relayer_client.models import DepositWalletCall, TransactionType
+            nonce_payload = self.relay_client.get_nonce(
+                self.relay_client.signer.address(), TransactionType.WALLET.value
+            )
+            wallet_nonce = str(nonce_payload["nonce"])
+            resp = self.relay_client.execute_deposit_wallet_batch(
+                calls=[DepositWalletCall(target=adapter, value="0", data=calldata)],
+                wallet_address=self.browser_wallet,
+                nonce=wallet_nonce,
+                deadline=str(int(_time.time()) + 600),
+            )
+        else:
+            resp = self.relay_client.execute(
+                [Transaction(to=adapter, data=calldata, value="0")],
+                "merge positions",
+            )
         result = resp.wait()  # txn dict on mined/confirmed, None on failure/timeout
 
         if not result:

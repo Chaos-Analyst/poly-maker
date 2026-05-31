@@ -101,6 +101,11 @@ async def main():
     print("\n")
     print(f'There are {len(global_state.df)} market, {len(global_state.positions)} positions and {len(global_state.orders)} orders. Starting positions: {global_state.positions}')
 
+    # Surface the active behavior switches so the running bot's mode is obvious in the logs.
+    _p = global_state.params['default']
+    print(f"Mode: selling {'ENABLED' if _p['enable_selling'] else 'DISABLED'}, "
+          f"build-both-sides {'ON' if _p['build_both_sides'] else 'OFF'}")
+
     # Start background update thread
     update_thread = threading.Thread(target=update_periodically, daemon=True)
     update_thread.start()
