@@ -1,68 +1,69 @@
 import json
-from poly_utils.google_utils import get_spreadsheet
-import pandas as pd 
 import os
+
+import pandas as pd  # noqa: F401  (kept for callers importing pd from here)
+
+from poly_utils import db
+
 
 def pretty_print(txt, dic):
     print("\n", txt, json.dumps(dic, indent=4))
 
-def get_sheet_df(read_only=None):
+
+def _required_float(name):
+    val = os.getenv(name)
+    if val is None or str(val).strip() == "":
+        raise ValueError(
+            f"Required env var {name} is not set. Copy it into your .env (see .env.example)."
+        )
+    return float(val)
+
+
+def _optional_float(name):
+    val = os.getenv(name)
+    if val is None or str(val).strip() == "":
+        return None
+    return float(val)
+
+
+def get_params_from_env():
+    """The five strategy hyperparameters as one global set (was the Hyperparameters sheet).
+
+    Returned under a 'default' key so trading.py's ``params[row['param_type']]``
+    keeps working unchanged -- every market is tagged param_type='default'.
     """
-    Get sheet data with optional read-only mode
-    
-    Args:
-        read_only (bool): If None, auto-detects based on credentials availability
+    return {
+        "default": {
+            "stop_loss_threshold": _required_float("STOP_LOSS_THRESHOLD"),
+            "spread_threshold": _required_float("SPREAD_THRESHOLD"),
+            "volatility_threshold": _required_float("VOLATILITY_THRESHOLD"),
+            "sleep_period": _required_float("SLEEP_PERIOD"),
+            "take_profit_threshold": _required_float("TAKE_PROFIT_THRESHOLD"),
+        }
+    }
+
+
+def get_market_df():
+    """Load the markets catalog from Postgres and global config from .env.
+
+    Returns ``(df, params)`` with the same shape the old Sheets reader returned, so
+    data_utils/trading consume it unchanged. The per-market sizing/grouping fields
+    that used to live in the Selected Markets sheet (trade_size, max_size,
+    multiplier, param_type) are injected here as global, .env-driven values.
     """
-    all = 'All Markets'
-    sel = 'Selected Markets'
+    params = get_params_from_env()
 
-    # Auto-detect read-only mode if not specified
-    if read_only is None:
-        creds_file = 'credentials.json' if os.path.exists('credentials.json') else '../credentials.json'
-        read_only = not os.path.exists(creds_file)
-        if read_only:
-            print("No credentials found, using read-only mode")
+    trade_size = _required_float("TRADE_SIZE")
+    max_size = _optional_float("MAX_SIZE")
+    multiplier = os.getenv("MULTIPLIER", "") or ""
 
-    try:
-        spreadsheet = get_spreadsheet(read_only=read_only)
-    except FileNotFoundError:
-        print("No credentials found, falling back to read-only mode")
-        spreadsheet = get_spreadsheet(read_only=True)
+    df = db.read_markets()
+    if len(df) > 0 and "question" in df.columns:
+        df = df[df["question"] != ""].reset_index(drop=True)
 
-    wk = spreadsheet.worksheet(sel)
-    df = pd.DataFrame(wk.get_all_records())
-    df = df[df['question'] != ""].reset_index(drop=True)
+    df["trade_size"] = trade_size
+    df["max_size"] = max_size if max_size is not None else trade_size
+    df["multiplier"] = multiplier
+    df["param_type"] = "default"
 
-    wk2 = spreadsheet.worksheet(all)
-    df2 = pd.DataFrame(wk2.get_all_records())
-    df2 = df2[df2['question'] != ""].reset_index(drop=True)
-
-    result = df.merge(df2, on='question', how='inner')
-
-    wk_p = spreadsheet.worksheet('Hyperparameters')
-    records = wk_p.get_all_records()
-    hyperparams, current_type = {}, None
-
-    for r in records:
-        # Update current_type only when we have a non-empty type value
-        # Handle both string and NaN values from pandas
-        type_value = r['type']
-        if type_value and str(type_value).strip() and str(type_value) != 'nan':
-            current_type = str(type_value).strip()
-        
-        # Skip rows where we don't have a current_type set
-        if current_type:
-            # Convert numeric values to appropriate types
-            value = r['value']
-            try:
-                # Try to convert to float if it's numeric
-                if isinstance(value, str) and value.replace('.', '').replace('-', '').isdigit():
-                    value = float(value)
-                elif isinstance(value, (int, float)):
-                    value = float(value)
-            except (ValueError, TypeError):
-                pass  # Keep as string if conversion fails
-            
-            hyperparams.setdefault(current_type, {})[r['param']] = value
-
-    return result, hyperparams
+    return df, params

@@ -1,6 +1,4 @@
 import gc                       # Garbage collection
-import os                       # Operating system interface
-import json                     # JSON handling
 import asyncio                  # Asynchronous I/O
 import traceback                # Exception handling
 import pandas as pd             # Data analysis library
@@ -12,10 +10,7 @@ import poly_data.CONSTANTS as CONSTANTS
 # Import utility functions for trading
 from poly_data.trading_utils import get_best_bid_ask_deets, get_order_prices, get_buy_sell_amount, round_down, round_up
 from poly_data.data_utils import get_position, get_order, set_position
-
-# Create directory for storing position risk information
-if not os.path.exists('positions/'):
-    os.makedirs('positions/')
+from poly_utils import db
 
 def send_buy_order(order):
     """
@@ -280,9 +275,6 @@ async def perform_trade(market):
                       f"Trade Size: {row['trade_size']}, Max Size: {max_size}, "
                       f"buy_amount: {buy_amount}, sell_amount: {sell_amount}")
 
-                # File to store risk management information for this market
-                fname = 'positions/' + str(market) + '.json'
-
                 # ------- SELL ORDER LOGIC -------
                 if sell_amount > 0:
                     # Skip if we have no average price (no real position)
@@ -339,8 +331,8 @@ async def perform_trade(market):
                         send_sell_order(order)
                         client.cancel_all_market(market)
 
-                        # Save risk details to file
-                        open(fname, 'w').write(json.dumps(risk_details))
+                        # Persist risk/cooldown state to Postgres
+                        db.set_risk(market, risk_details)
                         continue
 
                 # ------- BUY ORDER LOGIC -------
@@ -369,9 +361,8 @@ async def perform_trade(market):
 
                     # ------- RISK-OFF PERIOD CHECK -------
                     # If we're in a risk-off period (after stop-loss), don't buy
-                    if os.path.isfile(fname):
-                        risk_details = json.load(open(fname))
-
+                    risk_details = db.get_risk(market)
+                    if risk_details is not None:
                         start_trading_at = pd.to_datetime(risk_details['sleep_till'])
                         current_time = pd.Timestamp.utcnow().tz_localize(None)
 

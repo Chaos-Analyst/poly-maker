@@ -1,5 +1,5 @@
 import poly_data.global_state as global_state
-from poly_data.utils import get_sheet_df
+from poly_data.utils import get_market_df
 import time
 import poly_data.global_state as global_state
 
@@ -146,7 +146,7 @@ def set_order(token, side, size, price):
     
 
 def update_markets():
-    received_df, received_params = get_sheet_df()
+    received_df, received_params = get_market_df()
 
     if len(received_df) > 0:
         # Ensure multiplier column exists and fill NaN values with empty string

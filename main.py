@@ -9,6 +9,7 @@ from poly_data.data_utils import update_markets, update_positions, update_orders
 from poly_data.websocket_handlers import connect_market_websocket, connect_user_websocket
 import poly_data.global_state as global_state
 from poly_data.data_processing import remove_from_performing
+from poly_utils import db
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -17,7 +18,8 @@ def update_once():
     """
     Initialize the application state by fetching market data, positions, and orders.
     """
-    update_markets()    # Get market information from Google Sheets
+    db.init_db()        # Ensure the Postgres schema (risk_state) exists
+    update_markets()    # Load markets from Postgres + strategy config from .env
     update_positions()  # Get current positions from Polymarket
     update_orders()     # Get current orders from Polymarket
 

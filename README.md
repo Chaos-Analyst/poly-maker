@@ -8,7 +8,7 @@ Poly-Maker is a comprehensive solution for automated market making on Polymarket
 
 - Real-time order book monitoring via WebSockets
 - Position management with risk controls
-- Customizable trade parameters fetched from Google Sheets
+- Customizable trade parameters via environment variables (`.env`)
 - Automated position merging functionality
 - Sophisticated spread and price management
 
@@ -18,13 +18,13 @@ The repository consists of several interconnected modules:
 
 - `poly_data`: Core data management and market making logic (including relayer-based position merging)
 - `poly_stats`: Account statistics tracking
-- `poly_utils`: Shared utility functions
+- `poly_utils`: Shared utility functions (including the Postgres data layer, `db.py`)
 - `data_updater`: Separate module for collecting market information
 
 ## Requirements
 
 - Python 3.9.10 or higher
-- Google Sheets API credentials
+- Docker (for the local Postgres database)
 - Polymarket account and API credentials (including Builder API credentials for position merging)
 
 ## Installation
@@ -98,26 +98,31 @@ Edit the `.env` file with your credentials:
 
 **Important:** Make sure your wallet has done at least one trade through the UI so that the permissions are proper (this also sets the on-chain approvals the relayer merge relies on).
 
-#### 5. Set up Google Sheets integration
+#### 5. Start Postgres and configure strategy parameters
 
-- Create a Google Service Account and download credentials to the main directory
-- Copy the [sample Google Sheet](https://docs.google.com/spreadsheets/d/1Kt6yGY7CZpB75cLJJAdWo7LSp9Oz7pjqfuVWwgtn7Ns/edit?gid=1884499063#gid=1884499063)
-- Add your Google service account to the sheet with edit permissions
-- Update `SPREADSHEET_URL` in your `.env` file
+The bot stores market data, account stats, and risk state in Postgres.
+
+```bash
+docker compose up -d
+```
+
+This starts a local Postgres matching the default `DATABASE_URL` in `.env`; the schema is
+created automatically on first run. Then set your strategy parameters in `.env`
+(`STOP_LOSS_THRESHOLD`, `TRADE_SIZE`, …). See [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
+for what each one means.
 
 #### 6. Update market data
 
-Run the market data updater to fetch all available markets:
+Run the market data updater to fetch all available markets into Postgres:
 
 ```bash
 uv run python update_markets.py
 ```
 
-This should run continuously in the background (preferably on a different IP than your trading bot).
-
-- Add markets you want to trade to the "Selected Markets" sheet
-- Select markets from the "Volatility Markets" sheet
-- Configure parameters in the "Hyperparameters" sheet (default parameters that worked well in November are included)
+This should run continuously in the background (preferably on a different IP than your trading
+bot — point its `DATABASE_URL` at the Postgres host). It writes the `markets` table the bot trades.
+There is no manual market selection: the bot trades every market the updater keeps (those above the
+reward floor set in `update_markets.py`). Tune behavior via the `.env` parameters above.
 
 #### 7. Start the market making bot
 
@@ -130,11 +135,16 @@ uv run python main.py
  
 ## Configuration
 
-The bot is configured via a Google Spreadsheet with several worksheets:
+The bot is configured via `.env` and a Postgres database (no Google Sheets):
 
-- **Selected Markets**: Markets you want to trade
-- **All Markets**: Database of all markets on Polymarket
-- **Hyperparameters**: Configuration parameters for the trading logic
+- **`.env`** — strategy hyperparameters (`STOP_LOSS_THRESHOLD`, `SPREAD_THRESHOLD`,
+  `VOLATILITY_THRESHOLD`, `SLEEP_PERIOD`, `TAKE_PROFIT_THRESHOLD`) and position sizing
+  (`TRADE_SIZE`, `MAX_SIZE`, `MULTIPLIER`).
+- **Postgres `markets` table** — the catalog of markets the bot trades, written by `update_markets.py`.
+- **Postgres `summary` / `risk_state` tables** — account snapshot and per-market stop-loss cooldown.
+
+See [docs/CONFIGURATION.md](docs/CONFIGURATION.md) for the full reference, including how the old
+hand-edited config maps onto these settings and how to re-add manual market selection later.
 
 
 ## Position Merging

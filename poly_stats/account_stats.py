@@ -2,8 +2,7 @@ import pandas as pd
 from py_clob_client_v2.headers.headers import create_level_2_headers
 from py_clob_client_v2.clob_types import RequestArgs
 
-from poly_utils.google_utils import get_spreadsheet
-from gspread_dataframe import set_with_dataframe
+from poly_utils import db
 import requests
 import json
 import os
@@ -11,10 +10,9 @@ import os
 from dotenv import load_dotenv
 load_dotenv()
 
-spreadsheet = get_spreadsheet()
 
-def get_markets_df(wk_full):
-    markets_df = pd.DataFrame(wk_full.get_all_records())
+def get_markets_df():
+    markets_df = db.read_markets()
     markets_df = markets_df[['question', 'answer1', 'answer2', 'token1', 'token2']]
     markets_df['token1'] = markets_df['token1'].astype(str)
     markets_df['token2'] = markets_df['token2'].astype(str)
@@ -32,7 +30,7 @@ def get_all_orders(client):
         return orders_df
     else:
         return pd.DataFrame()
-    
+
 def get_all_positions(client):
     try:
         positions = client.get_all_positions()
@@ -41,8 +39,8 @@ def get_all_positions(client):
         return positions
     except:
         return pd.DataFrame()
-    
-def combine_dfs(orders_df, positions, markets_df, selected_df):
+
+def combine_dfs(orders_df, positions, markets_df):
     merged_df = orders_df.merge(positions, left_on=['asset_id'], right_on=['asset'], how='outer')
     merged_df['asset_id'] = merged_df['asset_id'].combine_first(merged_df['asset'])
     merged_df = merged_df.drop(columns='asset', axis=1)
@@ -67,9 +65,7 @@ def combine_dfs(orders_df, positions, markets_df, selected_df):
     combined_df['order_side'] = combined_df['order_side'].fillna('')
     combined_df = combined_df.fillna(0)
 
-    combined_df['marketInSelected'] = combined_df['question'].isin(selected_df['question'])
     combined_df = combined_df.sort_values('question')
-    combined_df = combined_df.sort_values('marketInSelected')
     return combined_df
 
 def get_earnings(client):
@@ -103,16 +99,8 @@ def get_earnings(client):
 
 
 def update_stats_once(client):
-    spreadsheet = get_spreadsheet()
-    wk_full = spreadsheet.worksheet('Full Markets')
-    wk_summary = spreadsheet.worksheet('Summary')
-
-
-    wk_sel = spreadsheet.worksheet('Selected Markets')
-    selected_df = pd.DataFrame(wk_sel.get_all_records())
-    
-    markets_df = get_markets_df(wk_full)
-    print("Got spreadsheet...")
+    markets_df = get_markets_df()
+    print("Got markets...")
 
     orders_df = get_all_orders(client)
     print("Got Orders...")
@@ -120,7 +108,7 @@ def update_stats_once(client):
     print("Got Positions...")
 
     if len(positions) > 0 or len(orders_df) > 0:
-        combined_df = combine_dfs(orders_df, positions, markets_df, selected_df)
+        combined_df = combine_dfs(orders_df, positions, markets_df)
         earnings = get_earnings(client.client)
         print("Got Earnings...")
         combined_df = combined_df.merge(earnings, on='question', how='left')
@@ -129,9 +117,8 @@ def update_stats_once(client):
         combined_df = combined_df.round(2)
 
         combined_df = combined_df.sort_values('earnings', ascending=False)
-        combined_df = combined_df[['question', 'answer', 'order_size', 'position_size', 'marketInSelected', 'earnings', 'earning_percentage']]
-        wk_summary.clear()
+        combined_df = combined_df[['question', 'answer', 'order_size', 'position_size', 'earnings', 'earning_percentage']]
 
-        set_with_dataframe(wk_summary, combined_df, include_index=False, include_column_header=True, resize=True)
+        db.write_summary(combined_df)
     else:
         print("Position or order is empty")

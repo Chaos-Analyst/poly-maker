@@ -17,17 +17,20 @@
 
 ## Repo norms
 - Dependencies are managed with **`uv`** (`uv sync`, `uv lock`, `uv run python ...`). Python 3.9.
-- Secrets live in `.env` (`PK`, `BROWSER_ADDRESS`, `SPREADSHEET_URL`, optional `SIGNATURE_TYPE`;
-  `BUILDER_API_KEY`/`BUILDER_SECRET`/`BUILDER_PASSPHRASE` for relayer merges).
-- Config/markets come from a Google Sheet (see README).
+- Secrets/config live in `.env` (`PK`, `BROWSER_ADDRESS`, optional `SIGNATURE_TYPE`;
+  `BUILDER_API_KEY`/`BUILDER_SECRET`/`BUILDER_PASSPHRASE` for relayer merges; `DATABASE_URL` for Postgres;
+  the 5 strategy hyperparameters + `TRADE_SIZE`/`MAX_SIZE`/`MULTIPLIER`).
+- Storage is **Postgres** (`markets`, `summary`, `risk_state`); strategy config is in `.env`. Google
+  Sheets was removed — see `docs/CONFIGURATION.md`.
 
 ## Project shape
 - `poly_data/polymarket_client.py` — `PolymarketClient`, the wrapper around the Polymarket CLOB client
   (orders, order book, cancels) + web3 (USDC/CTF balances) + relayer-based position merging.
 - `poly_data/` — websockets, data processing, global state, the market-making data layer.
+- `poly_utils/db.py` — Postgres data layer (`markets` / `summary` / `risk_state`); used by the bot, updater, and stats.
 - `trading.py` — the market-making strategy (consumes `global_state.client`, the wrapper).
 - `data_updater/` — separate market-discovery tooling (`update_markets.py`, `find_markets.py`).
-- `poly_stats/` — peripheral reporting to the Google Sheet.
+- `poly_stats/` — peripheral reporting to the Postgres `summary` table.
 
 ## CLOB client: we are on `py-clob-client-v2` (v1.0.1)
 This project was migrated from the legacy `py-clob-client==0.28.0` (CLOB v1) to
@@ -72,6 +75,21 @@ docs that the live `book` / `price_change` (`price_changes[]`) / user `trade`/`o
 only the `to` adapter differs. Needs Builder API creds in `.env`. The old Node.js `poly_merger/` subproject
 was removed.
 
+## Storage: Postgres + `.env` (Google Sheets removed)
+Storage was migrated off Google Sheets. `poly_utils/db.py` is the data layer (SQLAlchemy + `psycopg2`,
+connection from `DATABASE_URL`; `docker-compose.yml` runs a local Postgres). Three tables:
+- **`markets`** — catalog the updater writes (`update_markets.py` → `db.write_markets`, atomic
+  staging-table swap) and the bot reads every 30s (`poly_data/utils.py:get_market_df` → `db.read_markets`).
+  Column names match the old sheet (e.g. `3_hour`). The bot now trades **every** market in this table —
+  human selection was removed; the updater's `gm_reward_per_100 >= 0.75` floor defines the universe.
+- **`summary`** — account snapshot written by `poly_stats/account_stats.py` (`db.write_summary`).
+- **`risk_state`** — per-market stop-loss cooldown, replacing `positions/*.json` (`db.get_risk`/`set_risk`).
+  `time`/`sleep_till` are TEXT to keep `trading.py`'s naive-timestamp comparison correct.
+
+Strategy config moved from the Hyperparameters tab to `.env` as one global set (per-market `param_type`
+grouping dropped); `get_market_df` injects `trade_size`/`max_size`/`multiplier`/`param_type='default'` so
+`trading.py`/`trading_utils.py` are unchanged. Full reference + how to re-add selection: `docs/CONFIGURATION.md`.
+
 ## Known follow-ups (deferred, not done yet)
 - **On-chain V2 approvals must be run once.** `data_updater/trading_utils.py:approveContracts()` was
   updated to include the CTF Exchange V2 contracts (`0xE111180000d2663C0091e4f400237545B87B996B`,
@@ -81,6 +99,6 @@ was removed.
   require the proxy to have approved the v2 collateral adapters as ERC-1155 operators on the CTF
   (`0x4D97…`) — normally set by the same "enable trading" UI step.
 - v2 caches a token's tick size after first use; a long-running bot can hit a stale tick size if a market's
-  tick changes (near 0.04/0.96), causing rejects. Mitigation (deferred): pass `tick_size` from the sheet.
+  tick changes (near 0.04/0.96), causing rejects. Mitigation (deferred): pass `tick_size` from the markets table.
 - WS hardening (app-level `PING` every 10s; handle `tick_size_change`) and rewriting
   `poly_stats/account_stats.get_earnings` to v2's native rewards API are deferred.

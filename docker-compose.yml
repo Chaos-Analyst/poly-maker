@@ -1,0 +1,28 @@
+# Local Postgres for poly-maker (market data, summary, risk state).
+# Every process (bot, updater, stats) connects via its own DATABASE_URL, so the
+# same code runs no matter where each one lives:
+#   - on this machine:    DATABASE_URL=...@localhost:5432/polymaker
+#   - on another machine: set that process's DATABASE_URL to this host's address.
+# The port is published on 0.0.0.0:5432 below, so off-box access only needs your
+# firewall to allow 5432 — no code changes.
+services:
+  postgres:
+    image: postgres:16
+    container_name: poly-maker-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: poly
+      POSTGRES_PASSWORD: poly
+      POSTGRES_DB: polymaker
+    ports:
+      - "5432:5432"
+    volumes:
+      - poly_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U poly -d polymaker"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  poly_pgdata:
