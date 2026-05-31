@@ -6,6 +6,23 @@ import traceback                   # Exception handling
 from poly_data.data_processing import process_data, process_user_data
 import poly_data.global_state as global_state
 
+
+async def _keepalive(websocket, interval=10):
+    """Send Polymarket's app-level keepalive ("PING") every ``interval`` seconds.
+
+    Polymarket's CLOB websocket closes otherwise-idle connections unless it periodically receives
+    the literal text "PING"; it replies "PONG" (skipped by the recv loops). This runs as a task
+    alongside the recv loop and returns quietly once the connection is closing.
+    """
+    try:
+        while True:
+            await asyncio.sleep(interval)
+            await websocket.send("PING")
+    except Exception:
+        # Connection is closing/closed -- the recv loop's handler drives the reconnect.
+        return
+
+
 async def connect_market_websocket(chunk):
     """
     Connect to Polymarket's market WebSocket API and process market updates.
@@ -32,6 +49,9 @@ async def connect_market_websocket(chunk):
         print("\n")
         print(f"Sent market subscription message: {sub_message}")
 
+        # App-level keepalive so Polymarket doesn't drop an idle connection.
+        keepalive_task = asyncio.create_task(_keepalive(websocket))
+
         try:
             # Process incoming market data indefinitely
             while True:
@@ -49,6 +69,10 @@ async def connect_market_websocket(chunk):
                 except asyncio.TimeoutError:
                     continue
 
+                # Keepalive replies ("PONG", or a server-sent "PING") aren't JSON -- skip them.
+                if message in ("PONG", "PING"):
+                    continue
+
                 json_data = json.loads(message)
                 # Process order book updates and trigger trading as needed
                 process_data(json_data)
@@ -59,6 +83,7 @@ async def connect_market_websocket(chunk):
             print(f"Exception in market websocket: {e}")
             print(traceback.format_exc())
         finally:
+            keepalive_task.cancel()
             # Brief delay before attempting to reconnect
             await asyncio.sleep(5)
 
@@ -94,10 +119,16 @@ async def connect_user_websocket():
         print("\n")
         print(f"Sent user subscription message")
 
+        # App-level keepalive so Polymarket doesn't drop an idle connection.
+        keepalive_task = asyncio.create_task(_keepalive(websocket))
+
         try:
             # Process incoming user data indefinitely
             while True:
                 message = await websocket.recv()
+                # Keepalive replies ("PONG", or a server-sent "PING") aren't JSON -- skip them.
+                if message in ("PONG", "PING"):
+                    continue
                 json_data = json.loads(message)
                 # Process trade and order updates
                 process_user_data(json_data)
@@ -108,5 +139,6 @@ async def connect_user_websocket():
             print(f"Exception in user websocket: {e}")
             print(traceback.format_exc())
         finally:
+            keepalive_task.cancel()
             # Brief delay before attempting to reconnect
             await asyncio.sleep(5)
