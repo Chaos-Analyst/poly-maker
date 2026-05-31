@@ -246,7 +246,15 @@ async def perform_trade(market):
                 #if deet has None for one these values below, call it with min size of 20
                 if deets['best_bid'] is None or deets['best_ask'] is None or deets['best_bid_size'] is None or deets['best_ask_size'] is None:
                     deets = get_best_bid_ask_deets(market, detail['name'], 20, 0.1)
-                
+
+                # If the book is still empty/too thin to give a usable bid/ask (illiquid side, or a
+                # market that hasn't streamed yet), skip this token this cycle instead of crashing
+                # on round(None).
+                if any(deets[k] is None for k in
+                       ('best_bid', 'best_ask', 'best_bid_size', 'best_ask_size', 'top_bid', 'top_ask')):
+                    print(f"No usable bid/ask for {detail['answer']} ({detail['name']}); skipping this cycle")
+                    continue
+
                 # Extract all order book details
                 best_bid = deets['best_bid']
                 best_bid_size = deets['best_bid_size']
