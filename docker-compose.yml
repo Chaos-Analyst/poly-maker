@@ -1,10 +1,29 @@
-# Local Postgres for poly-maker (market data, summary, risk state).
-# Every process (bot, updater, stats) connects via its own DATABASE_URL, so the
-# same code runs no matter where each one lives:
-#   - on this machine:    DATABASE_URL=...@localhost:5432/polymaker
-#   - on another machine: set that process's DATABASE_URL to this host's address.
-# The port is published on 0.0.0.0:5432 below, so off-box access only needs your
-# firewall to allow 5432 — no code changes.
+# Local Postgres + the two poly-maker processes (market updater and trading bot).
+#   docker compose up -d --build      # start all three
+#   docker compose logs -f bot        # watch the bot
+#
+# Both app processes run one shared image (built once by the `bot` service; the
+# `updater` reuses the tag). DATABASE_URL is overridden here to reach Postgres by its
+# service name on the compose network; the localhost value in .env is only for running
+# the scripts directly on the host.
+
+x-app: &app
+  image: poly-maker:latest
+  restart: unless-stopped
+  env_file:
+    - .env
+  environment:
+    DATABASE_URL: postgresql+psycopg2://poly:poly@postgres:5432/polymaker
+    PYTHONUNBUFFERED: "1"
+  depends_on:
+    postgres:
+      condition: service_healthy
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
 services:
   postgres:
     image: postgres:16
@@ -23,6 +42,19 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # Trading bot. This service owns the image build; `updater` reuses the same tag.
+  bot:
+    <<: *app
+    build: .
+    container_name: poly-maker-bot
+    command: ["python", "main.py"]
+
+  # Market discovery loop: writes the sports-filtered `markets` table.
+  updater:
+    <<: *app
+    container_name: poly-maker-updater
+    command: ["python", "update_markets.py"]
 
 volumes:
   poly_pgdata:

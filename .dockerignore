@@ -1,0 +1,19 @@
+.git
+.gitignore
+.venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.DS_Store
+# Host pyenv pin (3.9.18); the image uses the base interpreter, which satisfies
+# requires-python (>=3.9.10). Copying it in would force an unavailable exact patch.
+.python-version
+tests
+docs
+data
+*.log
+# Secrets are injected at runtime via compose env_file, never baked into the image.
+.env
+.env.*
