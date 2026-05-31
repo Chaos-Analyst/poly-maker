@@ -121,36 +121,50 @@ def send_sell_order(order):
     )
 
 def merge_mergeable_pairs():
-    """Scan every traded market for held YES+NO pairs and merge them back into collateral.
+    """Scan ALL of the wallet's positions and merge every held YES+NO pair into collateral.
 
-    This is the balance-driven recycling used in delta-neutral (build-both-sides) mode -- it
-    replaces the old per-cycle constant-gated merge. It is called when an order is rejected for
-    insufficient balance/allowance, or when free collateral drops below the configured floor.
-    Merges the matched (min) amount of each pair via the relayer and updates local positions.
+    Balance-driven recycling for delta-neutral mode. Enumerates *every* position the wallet holds
+    via the data-api (``get_all_positions``) -- not just the markets currently in global_state.df --
+    groups them by condition, and merges each binary pair where both outcomes are held, through the
+    relayer. This frees collateral stranded in old/untraded markets too. Called on an
+    insufficient-balance order rejection or when free collateral drops below the configured floor.
     Returns True if at least one pair was merged.
     """
     client = global_state.client
-    if global_state.df is None or len(global_state.df) == 0:
+    try:
+        pos_df = client.get_all_positions()
+    except Exception as ex:
+        print(f"merge_mergeable_pairs: could not fetch positions: {ex}")
+        return False
+    if pos_df is None or len(pos_df) == 0 or 'conditionId' not in getattr(pos_df, 'columns', []):
+        print("merge_mergeable_pairs: no positions to merge")
         return False
 
     merged_any = False
-    for _, row in global_state.df.iterrows():
+    for condition_id, grp in pos_df.groupby('conditionId'):
         try:
-            t1, t2 = str(row['token1']), str(row['token2'])
-            # On-chain truth; get_position already zeroes dust (<1 share).
-            raw1, sh1 = client.get_position(t1)
-            raw2, sh2 = client.get_position(t2)
+            # A binary market is mergeable only when BOTH outcomes are held (>= 1 share each).
+            held = grp[grp['size'].astype(float) >= 1]
+            tokens = [str(a) for a in held['asset'].unique()]
+            if len(tokens) != 2:
+                continue
+            neg_risk = bool(held['negativeRisk'].iloc[0])
 
-            if sh1 >= 1 and sh2 >= 1:
-                amount_to_merge = min(raw1, raw2)          # raw 6-decimal base units
-                scaled_amt = amount_to_merge / 10**6        # shares
-                print(f"Merging pair for {row['question']}: {sh1}/{sh2} shares -> {scaled_amt}")
-                client.merge_positions(amount_to_merge, row['condition_id'], row['neg_risk'] == 'TRUE')
-                set_position(t1, 'SELL', scaled_amt, 0, 'merge')
-                set_position(t2, 'SELL', scaled_amt, 0, 'merge')
-                merged_any = True
+            # Exact on-chain balances; merge the matched (min) amount.
+            raws = [client.get_position(t)[0] for t in tokens]
+            amount_to_merge = min(raws)
+            scaled_amt = amount_to_merge / 10**6
+            if scaled_amt < 1:
+                continue
+
+            title = str(held['title'].iloc[0]) if 'title' in held.columns else condition_id
+            print(f"Merging pair for {title}: {scaled_amt} shares (cond {condition_id}, neg_risk={neg_risk})")
+            client.merge_positions(amount_to_merge, condition_id, neg_risk)
+            for t in tokens:
+                set_position(t, 'SELL', scaled_amt, 0, 'merge')
+            merged_any = True
         except Exception as ex:
-            print(f"Error merging pair for {row.get('question', '?')}: {ex}")
+            print(f"Error merging condition {condition_id}: {ex}")
             traceback.print_exc()
 
     if not merged_any:
