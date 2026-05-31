@@ -22,19 +22,33 @@ async def connect_market_websocket(chunk):
         If the connection is lost, the function will exit and the main loop will
         attempt to reconnect after a short delay.
     """
+    subscribed = list(chunk)
     uri = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
     async with websockets.connect(uri, ping_interval=5, ping_timeout=None) as websocket:
         # Prepare and send subscription message
-        message = {"assets_ids": chunk}
-        await websocket.send(json.dumps(message))
+        sub_message = {"assets_ids": subscribed}
+        await websocket.send(json.dumps(sub_message))
 
         print("\n")
-        print(f"Sent market subscription message: {message}")
+        print(f"Sent market subscription message: {sub_message}")
 
         try:
             # Process incoming market data indefinitely
             while True:
-                message = await websocket.recv()
+                # If the traded token set changed (the updater discovered new markets, or
+                # populated the table after we connected), return so the main loop reconnects
+                # and resubscribes with the current set.
+                if set(global_state.all_tokens) != set(subscribed):
+                    print("Market token set changed; reconnecting to resubscribe")
+                    return
+
+                try:
+                    # Time out periodically so we re-check the token set even when no book
+                    # updates arrive (e.g. an empty or stale subscription).
+                    message = await asyncio.wait_for(websocket.recv(), timeout=10)
+                except asyncio.TimeoutError:
+                    continue
+
                 json_data = json.loads(message)
                 # Process order book updates and trigger trading as needed
                 process_data(json_data)

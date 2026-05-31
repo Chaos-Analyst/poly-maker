@@ -30,11 +30,11 @@ def remove_from_pending():
     """
     try:
         current_time = time.time()
-            
+
         # Iterate through all performing trades
         for col in list(global_state.performing.keys()):
             for trade_id in list(global_state.performing[col]):
-                
+
                 try:
                     # If trade has been pending for more than 15 seconds, remove it
                     if current_time - global_state.performing_timestamps[col].get(trade_id, current_time) > 15:
@@ -43,7 +43,7 @@ def remove_from_pending():
                         print("After removing: ", global_state.performing, global_state.performing_timestamps)
                 except:
                     print("Error in remove_from_pending")
-                    print(traceback.format_exc())                
+                    print(traceback.format_exc())
     except:
         print("Error in remove_from_pending")
         print(traceback.format_exc())
@@ -58,11 +58,11 @@ def update_periodically():
     i = 1
     while True:
         time.sleep(5)  # Update every 5 seconds
-        
+
         try:
             # Clean up stale trades
             remove_from_pending()
-            
+
             # Update positions and orders every cycle
             update_positions(avgOnly=True)  # Only update average price, not position size
             update_orders()
@@ -71,24 +71,32 @@ def update_periodically():
             if i % 6 == 0:
                 update_markets()
                 i = 1
-                    
+
             gc.collect()  # Force garbage collection to free memory
             i += 1
         except:
             print("Error in update_periodically")
             print(traceback.format_exc())
-            
+
 async def main():
     """
     Main application entry point. Initializes client, data, and manages websocket connections.
     """
     # Initialize client
     global_state.client = PolymarketClient()
-    
+
     # Initialize state and fetch initial data
     global_state.all_tokens = []
     update_once()
     print("After initial updates: ", global_state.orders, global_state.positions)
+
+    # Don't open the market websocket until the updater has written markets, otherwise we'd
+    # subscribe to an empty/stale token set. On a fresh `docker compose up` the bot starts a
+    # few seconds before the updater's first write, so poll until the table is populated.
+    while global_state.df is None or len(global_state.df) == 0:
+        print("No markets in the table yet; waiting for the updater to populate it...")
+        time.sleep(5)
+        update_markets()
 
     print("\n")
     print(f'There are {len(global_state.df)} market, {len(global_state.positions)} positions and {len(global_state.orders)} orders. Starting positions: {global_state.positions}')
@@ -96,20 +104,25 @@ async def main():
     # Start background update thread
     update_thread = threading.Thread(target=update_periodically, daemon=True)
     update_thread.start()
-    
-    # Main loop - maintain websocket connections
+
+    # Main loop - maintain websocket connections. Whichever socket returns first (a disconnect,
+    # or the market socket noticing the token set changed and needing to resubscribe), cancel
+    # the other and reconnect both with the current token set.
     while True:
         try:
-            # Connect to market and user websockets simultaneously
-            await asyncio.gather(
-                connect_market_websocket(global_state.all_tokens), 
-                connect_user_websocket()
+            market_task = asyncio.create_task(connect_market_websocket(global_state.all_tokens))
+            user_task = asyncio.create_task(connect_user_websocket())
+            done, pending = await asyncio.wait(
+                {market_task, user_task}, return_when=asyncio.FIRST_COMPLETED
             )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
             print("Reconnecting to the websocket")
         except:
             print("Error in main loop")
             print(traceback.format_exc())
-            
+
         await asyncio.sleep(1)
         gc.collect()  # Clean up memory
 
