@@ -76,3 +76,30 @@ def test_update_markets_populates_global_state(env):
     assert "h1" in gs.all_tokens
     assert gs.REVERSE_TOKENS["h1"] == "h2"
     assert gs.REVERSE_TOKENS["h2"] == "h1"
+
+
+def test_update_markets_empty_table_does_not_crash(monkeypatch):
+    """Fresh database (empty markets table): update_markets() must not crash.
+
+    Regression for the Railway crash-loop. On a brand-new DB the markets table is
+    empty, so get_market_df() returns an empty DataFrame, the `len > 0` block is
+    skipped, and global_state.df is still its default None. The old code then iterated
+    global_state.df.iterrows() unconditionally -> AttributeError, crashing the bot in
+    update_once() before main.py's startup wait-loop could run. update_markets() must
+    instead leave df unset and return, so the bot waits for the updater's first write.
+    """
+    import poly_data.global_state as gs
+    import poly_data.data_utils as data_utils
+
+    # Simulate the empty markets read on a fresh database.
+    monkeypatch.setattr(data_utils, "get_market_df", lambda: (pd.DataFrame(), {}))
+
+    gs.df = None
+    gs.all_tokens = []
+    gs.REVERSE_TOKENS = {}
+    gs.performing = {}
+
+    data_utils.update_markets()  # must not raise
+
+    assert gs.df is None  # nothing to populate yet
+    assert gs.all_tokens == []  # no websocket subscriptions built

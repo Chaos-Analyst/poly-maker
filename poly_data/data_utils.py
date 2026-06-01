@@ -156,7 +156,14 @@ def update_markets():
             received_df['multiplier'] = received_df['multiplier'].fillna('')
             
         global_state.df, global_state.params = received_df.copy(), received_params
-    
+
+    # No markets to trade yet -- e.g. a fresh database before the updater's first write,
+    # where every markets read comes back empty and global_state.df is still its default
+    # None. Leave df as-is and return; main.py's startup loop polls update_markets() until
+    # the updater populates the table. (Without this guard the loop below would call
+    # None.iterrows() and crash the bot on boot.)
+    if global_state.df is None or len(global_state.df) == 0:
+        return
 
     for _, row in global_state.df.iterrows():
         for col in ['token1', 'token2']:
