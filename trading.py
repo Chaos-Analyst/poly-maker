@@ -57,8 +57,8 @@ def send_buy_order(order):
         trade = False
 
     if trade:
-        # Only place orders with prices between 0.1 and 0.9 to avoid extreme positions
-        if order['price'] >= 0.1 and order['price'] < 0.9:
+        # Only place orders with prices between 0.06 and 0.94 to avoid extreme positions
+        if order['price'] >= 0.06 and order['price'] < 0.94:
             print(f'Creating new order for {order["size"]} at {order["price"]}')
             print(order['token'], 'BUY', order['price'], order['size'])
             return client.create_order(
@@ -70,7 +70,7 @@ def send_buy_order(order):
                 post_only=order.get('post_only', False)
             )
         else:
-            print("Not creating buy order because its outside acceptable price range (0.1-0.9)")
+            print("Not creating buy order because its outside acceptable price range (0.06-0.94)")
     else:
         print(f'Not creating new order because order price of {order["price"]} is less than incentive start price of {incentive_start}. Mid price is {order["mid_price"]}')
 
@@ -381,7 +381,7 @@ async def perform_trade(market):
                         continue
 
                     # Maintain one resting buy of trade_size at bid_price. send_buy_order only
-                    # replaces when price/size actually changed and enforces the 0.1-0.9 +
+                    # replaces when price/size actually changed and enforces the 0.06-0.94 +
                     # incentive-spread guards, so calling it each cycle is cheap.
                     order['size'] = nd_buy
                     order['price'] = bid_price
